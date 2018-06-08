@@ -1,0 +1,176 @@
+*********************************************************
+Tutorial original https://www.linuxito.com/gnu-linux/nivel-alto/564-como-crear-un-esquema-de-backup-simple-para-tu-vps
+Modificaciones por Charlybs https://github.com/charlybs
+*********************************************************
+Configuración basada en sistemas DEBIAN.
+
+
+Crear la jerarquía de directorios necesaria para almacenar las copias de seguridad (backups):
+----------------------------------------------------
+root@linuxito:~# mkdir /backup
+root@linuxito:~# mkdir /backup/scripts
+root@linuxito:~# mkdir /backup/tmp
+root@linuxito:~# mkdir /backup/data
+root@linuxito:~# ll /backup
+total 12
+drwxr-xr-x 2 root root 4096 Aug 10 08:55 data
+drwxr-xr-x 2 root root 4096 Aug 10 08:29 scripts
+drwxr-xr-x 2 root root 4096 Aug 10 08:45 tmp
+----------------------------------------------------
+/backup es el directorio base para backups, /backup/scripts almacenará los scripts Bash que llevan a cabo las tareas, /backup/tmp es un directorio para archivos temporales, y /backup/data es el directorio donde se almacenarán las copias de seguridad.
+
+El primer script a crear se llama backup_files.sh, el cual se encarga de generar copias de seguridad de los archivos de los sitios Web:
+----------------------------------------------------
+root@linuxito:~# cd /backup/scripts
+root@linuxito:/backup/scripts# nano backup_files.sh
+----------------------------------------------------
+El código fuente del script es el siguiente:
+----------------------------------------------------
+#!/bin/bash
+
+# Directorios de trabajo
+BASE_DIR="/backup"
+BACKUP_DIR=$BASE_DIR"/data"
+
+# Obtener el nombre del directorio/archivo a resguardar
+if [ $# -lt 1 ]
+then
+  echo "uso: $0 DIR"
+  exit -1
+fi
+
+# Eliminar las barras (/) del nombre
+DIR=$1
+DIR_C=$(echo $DIR | sed 's/\///g')
+
+# Obtener la fecha y hora actual
+DATE=$(date +%Y-%m-%d_%H%M%S)
+
+# Comprimir y resguardar
+tar cjf $BACKUP_DIR/${DIR_C}_$DATE.tar.bzip2 $DIR 2>/dev/null
+----------------------------------------------------
+Este script toma como parámetro un archivo/directorio, el cual comprime en formato bzip2, para luego resguardarlo dentro del directorio /backup/data.
+
+Otorgar permisos de ejecución al script ejecutando:
+----------------------------------------------------
+root@linuxito:/backup/scripts# chmod +x backup_files.sh
+----------------------------------------------------
+Para verificar el funcionamiento del script, crear copias de seguridad de los directorios /etc (archivos de configuración del sistema) y /var/www (archivos de sitios Web de Apache en servidores Debian):
+----------------------------------------------------
+root@linuxito:/backup/scripts# ./backup_files.sh /etc
+root@linuxito:/backup/scripts# ./backup_files.sh /var/www/
+----------------------------------------------------
+Se generan los siguientes archivos:
+----------------------------------------------------
+root@linuxito:/backup/scripts# ll -h ../data/
+total 138M
+-rw-r--r-- 1 root root 558K Aug 10 08:54 etc_2015-08-10_085412.tar.bzip2
+-rw-r--r-- 1 root root 137M Aug 10 08:56 varwww_2015-08-10_085509.tar.bzip2
+----------------------------------------------------
+El siguiente script, backup_database.sh se encargará de resguardar volcados de bases de datos MySQL:
+----------------------------------------------------
+root@linuxito:/backup/scripts# nano backup_database.sh
+----------------------------------------------------
+El código fuente del script es el siguiente:
+----------------------------------------------------
+#!/bin/bash
+
+BASE_DIR="/backup"
+BACKUP_DIR=$BASE_DIR"/data"
+TMP_DIR=$BASE_DIR"/tmp"
+
+# Credenciales de un usuario MySQL con acceso de sólo lectura
+MYUSER=
+MYPASS=****
+
+# Parámetros y opciones para mysqldump
+ARGS="-u$MYUSER -p$MYPASS --add-drop-database --add-locks \
+--create-options --complete-insert --comments --disable-keys \
+--dump-date --extended-insert --quick --routines --triggers"
+
+if [ $# -lt 1 ]
+then
+        echo "uso: $0 DATABASE"
+        exit -1
+fi
+
+# Recuperar el nombre de base de datos pasado como parámetro
+DB=$1
+
+# Obtener un volcado de la base de datos
+mysqldump ${ARGS} $DB > $TMP_DIR/$DB.sql
+
+# Obtener la fecha y hora actual
+DATE=$(date +%Y-%m-%d_%H%M%S)
+
+# Comprimir y resguardar
+tar cjf $BACKUP_DIR/${DB}_$DATE.tar.bzip2 $TMP_DIR/$DB.sql 2>/dev/null
+
+# Eliminar el volcado
+rm $TMP_DIR/$DB.sql
+----------------------------------------------------
+Por seguridad se debe utilizar un usuario de MySQL que posea permisos de sólo lectura sobre todas las bases de datos. Además se debe eliminar el permiso de lectura para el script para "others", ya que posee la contraseña hardcodeada en texto plano:
+----------------------------------------------------
+root@linuxito:/backup/scripts# chmod 750 backup_database.sh
+----------------------------------------------------
+Si aún no se cuenta con un usuario MySQL que tenga acceso de lectura a cualquier base de datos, es posible crear uno conectándose al motor de bases de datos MySQL como "root" desde línea de comandos:
+----------------------------------------------------
+$ mysql -u root -p
+----------------------------------------------------
+Y ejecutar las siguientes consultas para crear un usuario "backup":
+----------------------------------------------------
+mysql> create user 'backup'@'localhost' identified by '12345678';
+mysql> grant lock tables, select on *.* to 'backup'@'localhost';
+----------------------------------------------------
+En este ejemplo he asignado la contraseña del 1 al 8 para que sea segura.
+Verificar el funcionamiento del script:
+----------------------------------------------------
+root@linuxito:/backup/scripts# ./backup_database.sh linuxito
+----------------------------------------------------
+Notar que se genera el archivo linuxito_2015-08-10_110156.tar.bzip2:
+----------------------------------------------------
+root@linuxito:/backup/scripts# ll ../data/
+total 141900
+-rw-r--r-- 1 root root    571339 Aug 10 08:54 etc_2015-08-10_085412.tar.bzip2
+-rw-r--r-- 1 root root   1129485 Aug 10 11:01 linuxito_2015-08-10_110156.tar.bzip2
+-rw-r--r-- 1 root root 143595513 Aug 10 08:56 varwww_2015-08-10_085509.tar.bzip2
+----------------------------------------------------
+
+Este script se encarga de mantener, dentro del directorio /backup/copy, sólo las versiones más recientes de backups de bases de datos y archivos. Utiliza find para encontrar dentro de /backup/data los archivos *.bzip2 modificados en las últimas 24 horas. Por ello es importante que este script corra una vez que se haya creado un backup fresco de los archivos (a lo sumo 23 horas más tarde).
+----------------------------------------------------
+#!/bin/bash
+
+COPY_DIR="/backup/copy"
+BACKUP_DIR="/backup/data"
+
+# Borrar copias de respaldo viejas de la carpeta copy
+rm $COPY_DIR/*.bzip2 >/dev/null 2>&1
+
+# Copiar copias de respaldo nuevas a la carpeta copy
+for F in $(find $BACKUP_DIR -type f -name "*.bzip2" -mtime -1); do
+  cp $F $COPY_DIR
+done
+
+# Borrar copias de respaldo viejas de la carpeta data
+rm $BACKUP_DIR/*.bzip2 >/dev/null 2>&1
+----------------------------------------------------
+El último paso consiste en configurar las tareas de cron para ejecutar estos scripts automáticamente, de forma periódica:
+----------------------------------------------------
+root@linuxito:/backup/scripts# nano /etc/cron.d/backup
+----------------------------------------------------
+----------------------------------------------------
+# Backup database "linuxito" (everyday)
+0 2 * * * root /backup/scripts/backup_database.sh "linuxito" >> /var/log/backup/backup_database.log 2>&1
+# Backup /var/www (weekly)
+0 2 * * 1 root /backup/scripts/backup_files.sh /var/www >> /var/log/backup/backup_files.log 2>&1
+# Upload 2 Copy (weekly)
+0 3 * * 1 root /backup/scripts/backup_2copy.sh >> /var/log/backup/backup_2copy.log 2>&1
+----------------------------------------------------
+Una vez al día, a las 2:00 AM, se crea un backup fresco de las bases de datos.
+El primer día de cada semana se crea un backup fresco de los archivos a las 2:00 AM.
+Finalmente se eliminan los archivos de backup viejos a las 3:00 AM.
+
+Para terminar, crear el directorio para almacenar los logs de backup:
+----------------------------------------------------
+root@linuxito:/backup/scripts# mkdir /var/log/backup
+----------------------------------------------------
